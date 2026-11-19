@@ -1,0 +1,82 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Find the project (unzips folio-project.zip if you uploaded it)
+        run: |
+          if [ -f folio-project.zip ]; then
+            mkdir -p _app
+            unzip -oq folio-project.zip -d _app
+            DIR=$(dirname "$(find _app -maxdepth 2 -name package.json | head -1)")
+          else
+            DIR=.
+          fi
+          echo "APP_DIR=$DIR" >> "$GITHUB_ENV"
+          echo "Project folder: $DIR"
+
+      - name: Install packages and build the web app
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Create the Android project (Android 8.0 and newer)
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          rm -rf android
+          npx cap add android
+          sed -i 's/minSdkVersion = .*/minSdkVersion = 26/' android/variables.gradle
+          sed -i 's#</manifest>#    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />\n</manifest>#' android/app/src/main/AndroidManifest.xml
+          if [ -d assets ]; then npx @capacitor/assets generate --android || echo "Icon step skipped"; fi
+          npx cap sync android
+
+      - name: Build the APK
+        working-directory: ${{ env.APP_DIR }}/android
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Rename the APK
+        run: |
+          mkdir -p out
+          cp "$APP_DIR/android/app/build/outputs/apk/debug/app-debug.apk" out/Folio-PDF.apk
+
+      - name: Keep a copy in the Actions tab
+        uses: actions/upload-artifact@v4
+        with:
+          name: Folio-PDF-apk
+          path: out/Folio-PDF.apk
+
+      - name: Publish to Releases (easy download on your phone)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-build-${{ github.run_number }}
+          name: Folio PDF APK (build ${{ github.run_number }})
+          body: "Tap **Folio-PDF.apk** below to download, then open it to install."
+          files: out/Folio-PDF.apk
